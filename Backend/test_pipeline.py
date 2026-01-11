@@ -11,8 +11,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 from twelvelabs_service import process_workout_video, get_or_create_index
-from muscle_map import calculate_session_activation
+from muscle_map import calculate_session_activation, EXERCISE_MUSCLE_MAP
 from gemini_service import calculate_form_score
+from pose_service import PoseAnalyzer
 
 
 def test_video_processing(video_path: str, analyze_deeply: bool = True):
@@ -31,19 +32,25 @@ def test_video_processing(video_path: str, analyze_deeply: bool = True):
     print("-" * 70)
 
     start_time = time.time()
+    
+    # Initialize services
+    pose_analyzer = PoseAnalyzer()
 
     def on_status(msg: str, pct: int):
         elapsed = time.time() - start_time
         print(f"  [{pct:3d}%] [{elapsed:5.1f}s] {msg}")
 
     try:
-        # Process the video
+        # Step 1: TwelveLabs (Upload + Segment + Classify) + MediaPipe (Parallel)
         result = process_workout_video(
             file_path=video_path,
             on_status=on_status,
-            analyze_form_deeply=analyze_deeply
+            analyze_form_deeply=True 
         )
-
+        
+        exercises = result['exercises']
+        print(f"\n[Pipeline] Processed {len(exercises)} exercises.")
+        
         total_time = time.time() - start_time
         print("-" * 70)
         print(f"Processing completed in {total_time:.1f} seconds")
@@ -61,6 +68,10 @@ def test_video_processing(video_path: str, analyze_deeply: bool = True):
             print(f"\n   {i}. {ex.name}")
             print(f"      Time: {ex.start_sec:.1f}s - {ex.end_sec:.1f}s ({ex.duration_sec:.1f}s)")
             print(f"      Reps: {ex.reps}")
+            if ex.weight_kg:
+                print(f"      Weight: {ex.weight_kg} kg")
+            if ex.avg_quality_score:
+                print(f"      Quality Score: {ex.avg_quality_score:.2f}x")
 
             if ex.form_feedback:
                 print(f"      Form Feedback ({len(ex.form_feedback)} notes):")
@@ -71,7 +82,10 @@ def test_video_processing(video_path: str, analyze_deeply: bool = True):
                     print(f"         {icon} [{fb.timestamp_sec:.1f}s] {fb.note}")
 
             if ex.avg_joint_angles:
-                print(f"      Joint Angles: {ex.avg_joint_angles}")
+                if ex.range_of_motion:
+                    print(f"      ROM: {ex.range_of_motion}")
+                else:
+                    print(f"      Joint Angles: {ex.avg_joint_angles}")
 
         # Calculate muscle activation
         if exercises:

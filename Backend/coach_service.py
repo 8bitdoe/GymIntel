@@ -82,6 +82,10 @@ COACH_TOOLS = [
                 "days": {
                     "type": "integer",
                     "description": "Number of days to look back (default 30)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of issues to return (default 10)"
                 }
             }
         }
@@ -139,7 +143,16 @@ def handle_get_recent_workouts(user_id: str, days: int = 30, limit: int = 5) -> 
             "workouts": [
                 {
                     "date": w.created_at.isoformat() if w.created_at else "Unknown",
-                    "exercises": [e.name for e in w.exercises],
+                    "exercises": [
+                        {
+                            "name": e.name,
+                            "reps": e.reps,
+                            "sets": e.sets,
+                            "weight": f"{e.weight_kg}kg" if e.weight_kg else None,
+                            "quality": f"{e.avg_quality_score:.2f}x" if e.avg_quality_score else None
+                        }
+                        for e in w.exercises
+                    ],
                     "duration_min": round(w.video_duration_sec / 60, 1) if w.video_duration_sec else 0,
                     "form_score": w.form_score
                 }
@@ -166,7 +179,7 @@ def handle_get_muscle_balance(user_id: str, days: int = 30) -> dict:
         return {"error": str(e), "status": "error"}
 
 
-def handle_get_form_issues(user_id: str, exercise: str = None, days: int = 30) -> dict:
+def handle_get_form_issues(user_id: str, exercise: str = None, days: int = 30, limit: int = 10, **kwargs) -> dict:
     """Get form issues from recent workouts."""
     try:
         from database import get_form_issues_summary
@@ -177,7 +190,7 @@ def handle_get_form_issues(user_id: str, exercise: str = None, days: int = 30) -
 
         return {
             "count": len(issues),
-            "issues": issues[:10]  # Limit to 10 most recent
+            "issues": issues[:limit]
         }
     except Exception as e:
         return {"error": str(e), "count": 0, "issues": []}

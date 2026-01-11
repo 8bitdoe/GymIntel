@@ -10,6 +10,9 @@ from google.genai import types
 from config import settings
 from models import Workout, ExerciseSegment, MuscleActivationSummary
 
+from PIL import Image
+import io
+
 # ============================================================
 # Client Initialization
 # ============================================================
@@ -25,9 +28,47 @@ def get_client() -> genai.Client:
     return _client
 
 
-# ============================================================
-# Workout Analysis Prompts
-# ============================================================
+
+def estimate_weight_from_image(image_bytes: bytes, exercise_name: str) -> float:
+    """
+    Estimate the weight being lifted using Gemini Vision.
+    Returns estimated weight in KG or 0 if unknown.
+    """
+    client = get_client()
+    
+    prompt = f"""
+    Analyze this image of a person performing {exercise_name}.
+    Estimate the weight being lifted (in KG).
+    
+    Consider:
+    - Plate size and color (Standard plates: Red=25kg, Blue=20kg, Yellow=15kg, Green=10kg)
+    - Dumbbell size
+    - Barbell type (Standard olympic bar = 20kg)
+    
+    If unsure, provide a conservative estimate for an intermediate lifter.
+    Return ONLY the number (integer or float).
+    """
+    
+    try:
+        # Load image for processing if needed, but Gemini accepts bytes part directly
+        response = client.models.generate_content(
+            model=settings.GEMINI_ANALYSIS_MODEL,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                prompt
+            ]
+        )
+        
+        text = response.text.strip().lower()
+        # Extract number
+        import re
+        match = re.search(r"(\d+(\.\d+)?)", text)
+        if match:
+            return float(match.group(1))
+        return 0.0
+    except Exception as e:
+        print(f"Error estimating weight: {e}")
+        return 0.0
 
 WORKOUT_SUMMARY_PROMPT = """
 You are an expert fitness coach analyzing a workout session.
@@ -260,6 +301,71 @@ def analyze_form_with_pose_data(
             "tips": [response.text.strip()]
         }
 
+
+def generate_workout_insights(exercises: list[ExerciseSegment]) -> dict:
+    """
+    Generate comprehensive workout insights using Gemini.
+    Returns: { "summary": str, "insights": list[str], "recommendations": list[str] }
+    """
+    if not exercises:
+        return {
+            "summary": "No exercises detected.", 
+            "insights": [], 
+            "recommendations": []
+        }
+        
+    client = get_client()
+    
+    # Prepare context
+    ex_list = []
+    muscles_hit = set()
+    
+    for ex in exercises:
+        ex_str = f"- {ex.name}: {ex.reps} reps"
+        if ex.form_feedback:
+            issues = [f"{fb.note} ({fb.severity})" for fb in ex.form_feedback if fb.severity != "info"]
+            if issues:
+                ex_str += f" (Issues: {'; '.join(issues)})"
+        ex_list.append(ex_str)
+        # We would use muscle map here ideally but let's infer simply or use data if present
+    
+    prompt = f"""
+    Analyze this workout session:
+    
+    EXERCISES PERFORMED:
+    {chr(10).join(ex_list)}
+    
+    Provide a response in JSON format with the following fields:
+    1. "summary": A 2-3 sentence encouraging summary of the workout.
+    2. "insights": 3 bullet points on performance, form, or volume.
+    3. "recommendations": 2-3 specific suggestions for the next workout based on this performance.
+    
+    JSON Format:
+    {{
+      "summary": "...",
+      "insights": ["...", "..."],
+      "recommendations": ["...", "..."]
+    }}
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model=settings.GEMINI_ANALYSIS_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.4
+            )
+        )
+        
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating insights: {e}")
+        return {
+            "summary": "Workout completed.",
+            "insights": ["Great job consistenting showing up."],
+            "recommendations": []
+        }
 
 def generate_recommendations(
         muscle_activation: dict[str, float],

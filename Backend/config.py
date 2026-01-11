@@ -24,8 +24,8 @@ class Settings(BaseSettings):
 
     # Google Gemini
     GOOGLE_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash-preview-native-audio-dialog"
-    GEMINI_ANALYSIS_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini-2.0-flash-exp"
+    GEMINI_ANALYSIS_MODEL: str = "gemini-2.0-flash-exp"
 
     # Snowflake (for social/benchmarking features)
     SNOWFLAKE_ACCOUNT: str = ""

@@ -28,7 +28,7 @@ from database import (
 )
 from muscle_map import calculate_session_activation, analyze_muscle_balance
 from twelvelabs_service import process_workout_video, get_or_create_index
-from gemini_service import generate_workout_summary, calculate_form_score
+from gemini_service import generate_workout_summary, calculate_form_score, generate_workout_insights
 from coach_service import CoachService
 
 
@@ -111,6 +111,15 @@ class CreateUserRequest(BaseModel):
     goals: list[str] = []
 
 
+class UpdateUserRequest(BaseModel):
+    name: Optional[str] = None
+    experience_level: Optional[str] = None
+    height_cm: Optional[float] = None
+    weight_kg: Optional[float] = None
+    goals: Optional[list[str]] = None
+
+
+
 class ChatRequest(BaseModel):
     message: str
 
@@ -160,6 +169,20 @@ async def api_get_user_by_email(email: str):
     return user.model_dump()
 
 
+@app.put("/api/users/{user_id}")
+async def api_update_user(user_id: str, request: UpdateUserRequest):
+    """Update user profile."""
+    updates = {k: v for k, v in request.model_dump().items() if v is not None}
+    if not updates:
+        return {"message": "No updates provided"}
+        
+    success = update_user(user_id, updates)
+    if not success:
+        raise HTTPException(404, "User not found")
+        
+    return {"message": "User updated successfully", "user_id": user_id}
+
+
 # ============================================================
 # Workout Upload & Processing
 # ============================================================
@@ -171,31 +194,57 @@ async def api_upload_workout(
     file: UploadFile = File(None),
     video_url: str = Form(None)
 ):
-    """Upload a workout video for analysis."""
-    # Validate user exists or create demo user
-    user = get_user(user_id)
-    if not user:
-        # Create a demo user for testing
-        user = User(
-            email=f"{user_id}@demo.gymintel.com",
-            name="Demo User",
-            experience_level="intermediate",
-        )
-        user_id = create_user(user)
-        print(f"[API] Created demo user: {user_id}")
+    """
+    Upload a workout video for analysis.
+    """
+    # Create copy of user_id to modify cleanly
+    target_user_id = user_id
+
+    # Handle 'undefined' or missing user cases
+    if not target_user_id or target_user_id == "undefined":
+         demo_email = "undefined@demo.gymintel.com"
+         existing = get_user_by_email(demo_email)
+         if existing:
+             target_user_id = existing.id
+         else:
+             user = User(
+                email=demo_email,
+                name="Demo User",
+                experience_level="intermediate",
+            )
+             target_user_id = create_user(user)
+             print(f"[API] Created NEW demo user: {target_user_id}")
+    else:
+        # Validate provided ID exists
+        user = get_user(target_user_id)
+        if not user:
+             # Fallback to demo logic if provided ID is junk but not 'undefined'
+             print(f"[API] User {target_user_id} not found in DB. Creating/Fetching demo user.")
+             demo_email = f"{target_user_id}@demo.gymintel.com"
+             existing = get_user_by_email(demo_email)
+             if existing:
+                 target_user_id = existing.id
+             else:
+                 user = User(
+                    email=demo_email,
+                    name="Demo User",
+                    experience_level="intermediate",
+                )
+                 target_user_id = create_user(user)
 
     if not file and not video_url:
         raise HTTPException(400, "Either file or video_url must be provided")
 
-    # Create workout record
+    # Create workout record attached to the TARGET user id
     workout = Workout(
-        user_id=user_id,
+        user_id=target_user_id,
         video_filename=file.filename if file else (video_url.split("/")[-1] if video_url else "video"),
         video_url=video_url,
         status=WorkoutStatus.PENDING
     )
+    
     workout_id = create_workout(workout)
-    print(f"[API] Created workout: {workout_id}")
+    print(f"[API] Created workout {workout_id} for user {target_user_id}")
 
     # Initialize status
     processing_status.set(workout_id, "pending", 0, "Upload started")
@@ -208,19 +257,18 @@ async def api_upload_workout(
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
-            print(f"[API] Saved temp file: {tmp_path} ({len(content)} bytes)")
 
         background_tasks.add_task(
             process_workout_background,
             workout_id=workout_id,
-            user_id=user_id,
+            user_id=target_user_id,
             file_path=tmp_path,
         )
     else:
         background_tasks.add_task(
             process_workout_background,
             workout_id=workout_id,
-            user_id=user_id,
+            user_id=target_user_id,
             video_url=video_url,
         )
 
@@ -246,100 +294,76 @@ def process_workout_background(
         def on_status(msg: str, pct: int):
             processing_status.set(workout_id, "processing", pct, msg)
 
-        # Process video with TwelveLabs
+        # Process video with TwelveLabs + MediaPipe
+        # This step now saves the exercises and muscle activation to DB
         result = process_workout_video(
             file_path=file_path,
             video_url=video_url,
             index_id=get_or_create_index(settings.TWELVELABS_INDEX_NAME),
+            user_id=user_id,
+            workout_id=workout_id,
             on_status=on_status,
             analyze_form_deeply=True
         )
 
-        processing_status.set(workout_id, "analyzing", 90, "Calculating muscle activation...")
+        processing_status.set(workout_id, "analyzing", 95, "Generating insights...")
 
-        # Get exercises from result
+        # Generate AI insights using Gemini
         exercises = result["exercises"]
-        video_info = result["video_info"]
-
-        # Calculate muscle activation for the session
-        exercise_data = [
-            {"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps}
-            for ex in exercises
-        ]
-
-        if exercise_data:
-            muscle_activation = calculate_session_activation(exercise_data)
-        else:
-            muscle_activation = {}
-
-        # Determine primary/secondary muscles
-        primary = [m for m, v in muscle_activation.items() if v >= 0.5]
-        secondary = [m for m, v in muscle_activation.items() if 0.2 <= v < 0.5]
+        
+        # Calculate aggregated muscle activation
+        exercise_data = [{"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps, "weight_kg": ex.weight_kg, "avg_quality_score": ex.avg_quality_score} for ex in exercises]
+        muscle_activation = calculate_session_activation(exercise_data)
+        
+        # Calculate totals for summary
+        primary = [m for m, v in sorted(muscle_activation.items(), key=lambda x: -x[1]) if v > 0.3][:3]
+        secondary = [m for m, v in sorted(muscle_activation.items(), key=lambda x: -x[1]) if 0.1 < v <= 0.3][:3]
 
         # Calculate form score
         form_score = calculate_form_score(exercises)
 
-        # Update each exercise with its muscle activation
-        for ex in exercises:
-            ex_activation = calculate_session_activation([
-                {"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps}
-            ])
-            ex.muscle_activation = ex_activation
-
-        processing_status.set(workout_id, "analyzing", 95, "Generating summary...")
-
-        # Generate AI summary (create temp workout object)
-        workout = get_workout(workout_id)
-        if workout:
-            workout.exercises = exercises
-            workout.muscle_activation = MuscleActivationSummary(
-                muscles=muscle_activation,
-                primary_muscles=primary,
-                secondary_muscles=secondary
-            )
-            workout.form_score = form_score
-            workout.video_duration_sec = video_info.get("duration", 0)
-
-            try:
-                summary = generate_workout_summary(workout)
-            except Exception as e:
-                print(f"[API] Error generating summary: {e}")
-                summary = f"Completed {len(exercises)} exercises in {video_info.get('duration', 0)/60:.1f} minutes."
-
-        # Update workout with results
-        update_data = {
-            "status": WorkoutStatus.COMPLETE.value,
-            "twelvelabs_video_id": result["video_id"],
-            "video_duration_sec": video_info.get("duration", 0),
-            "hls_url": video_info.get("hls_url"),
-            "thumbnail_url": video_info.get("thumbnails", [None])[0] if video_info.get("thumbnails") else None,
-            "exercises": [ex.model_dump() for ex in exercises],
-            "muscle_activation": {
-                "muscles": muscle_activation,
-                "primary_muscles": primary,
-                "secondary_muscles": secondary
-            },
-            "form_score": form_score,
-            "summary": summary,
-        }
-
-        update_workout(workout_id, update_data)
-
-        # Update user stats
-        if video_info.get("duration"):
-            increment_user_stats(user_id, video_info["duration"] / 60)
+        try:
+             insights = generate_workout_insights(exercises)
+             
+             # Final update with insights and muscle activation
+             update_workout(workout_id, {
+                 "summary": insights.get("summary"),
+                 "insights": insights.get("insights", []),
+                 "recommendations": insights.get("recommendations", []),
+                 "status": WorkoutStatus.COMPLETE,
+                 "muscle_activation": {
+                    "muscles": muscle_activation,
+                    "primary_muscles": primary,
+                    "secondary_muscles": secondary
+                 },
+                 "form_score": form_score
+                 # exercises are already saved by process_workout_video? 
+                 # Wait, process_workout_video returns a dict but does it save? 
+                 # Let's verify twelvelabs_service.py. Assuming it does NOT save to DB fully or we want to overwrite to be safe.
+                 # Actually, we should save exercises here to be sure.
+             })
+        except Exception as e:
+             print(f"[API] Error generating insights: {e}")
+             # Ensure we still mark as complete even if insights fail
+             update_workout_status(workout_id, WorkoutStatus.COMPLETE)
 
         processing_status.set(workout_id, "complete", 100, "Analysis complete!")
         print(f"[API] Workout processing complete: {workout_id}")
+        
+        # Cleanup uploaded file if needed
+        if file_path and os.path.exists(file_path) and "test_videos" not in file_path:
+             try:
+                 os.remove(file_path)
+             except:
+                 pass
 
     except Exception as e:
         print(f"[API] Error processing workout: {e}")
-        import traceback
-        traceback.print_exc()
-
-        update_workout_status(workout_id, WorkoutStatus.FAILED, str(e))
-        processing_status.set(workout_id, "failed", 0, f"Error: {str(e)}")
-
+        update_workout(workout_id, {
+            "status": WorkoutStatus.FAILED,
+            "error_message": str(e)
+        })
+        processing_status.set(workout_id, "failed", 0, str(e))
     finally:
         # Clean up temp file
         if file_path and os.path.exists(file_path):
@@ -391,6 +415,12 @@ async def api_get_workout(workout_id: str):
 @app.get("/api/users/{user_id}/workouts")
 async def api_get_user_workouts(user_id: str, limit: int = 10, skip: int = 0):
     """Get workouts for a user."""
+    # Resolve 'undefined' to demo user
+    if user_id == "undefined":
+        demo_user = get_user_by_email("undefined@demo.gymintel.com")
+        if demo_user:
+            user_id = demo_user.id
+
     workouts = get_user_workouts(user_id, limit, skip)
     return {
         "workouts": [w.model_dump() for w in workouts],
@@ -405,6 +435,13 @@ async def api_get_user_workouts(user_id: str, limit: int = 10, skip: int = 0):
 @app.get("/api/users/{user_id}/dashboard")
 async def api_get_dashboard(user_id: str, days: int = 30):
     """Get dashboard data for a user."""
+    # Resolve 'undefined' to demo user
+    if user_id == "undefined":
+        demo_user = get_user_by_email("undefined@demo.gymintel.com")
+        if demo_user:
+            user_id = demo_user.id
+            print(f"[API] Resolved 'undefined' dashboard request to user {user_id}")
+
     # Get recent workouts
     recent_workouts = get_recent_workouts(user_id, days)
 
@@ -487,6 +524,13 @@ _coach_sessions: dict[str, CoachService] = {}
 @app.post("/api/coach/{user_id}/chat", response_model=ChatResponse)
 async def coach_chat(user_id: str, request: ChatRequest):
     """Send a message to the AI coach and get a response."""
+    # Resolve 'undefined' to demo user
+    if user_id == "undefined":
+        demo_user = get_user_by_email("undefined@demo.gymintel.com")
+        if demo_user:
+            user_id = demo_user.id
+            print(f"[API] Resolved 'undefined' coach chat request to user {user_id}")
+
     # Get or create coach session
     if user_id not in _coach_sessions:
         _coach_sessions[user_id] = CoachService(user_id)

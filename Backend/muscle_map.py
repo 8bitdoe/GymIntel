@@ -221,7 +221,7 @@ def get_muscle_activation(exercise: str) -> MuscleActivation | None:
 
 
 def calculate_session_activation(
-        exercises: list[dict],  # [{"name": str, "duration_sec": float, "reps": int}]
+        exercises: list[dict],  # [{"name": str, "duration_sec": float, "reps": int, "avg_quality_score": float, "weight_kg": float}]
 ) -> dict[str, float]:
     """
     Calculate total muscle activation for a workout session.
@@ -235,20 +235,40 @@ def calculate_session_activation(
         muscle_data = get_muscle_activation(ex["name"])
         if not muscle_data:
             continue
+            
+        # Extract intensity modifiers
+        quality_score = ex.get("avg_quality_score", 1.0)
+        reps = ex.get("reps", 0)
+        duration = ex.get("duration_sec", 60)
+        weight_kg = ex.get("weight_kg", 0)
+        
+        # Determine "effective load"
+        # If weight is known, use it to scale (e.g., 20kg vs 100kg)
+        # We need a relative scale. Let's say baseline "bodyweight" effort is 1.0
+        # This is a heuristic.
+        weight_modifier = 1.0
+        if weight_kg > 0:
+            # Simple log scale or linear? Let's do simple linear bonus: 1kg = +1% intensity
+            weight_modifier = 1.0 + (weight_kg / 50.0) 
 
-        # Weight by estimated time-under-tension
-        weight = ex.get("duration_sec", 60) * (ex.get("reps", 10) / 10)
-        total_weight += weight
+        # Weight by estimated time-under-tension AND intensity
+        # Volume = Duration (or Reps * 3s)
+        # Intensity = Quality * Weight
+        
+        base_volume = reps * 3 if reps > 0 else duration
+        work_unit = base_volume * quality_score * weight_modifier
+        
+        total_weight += work_unit
 
         # Add primary muscle activations
         for muscle, value in muscle_data["primary"].items():
             if muscle in activation:
-                activation[muscle] += value * weight
+                activation[muscle] += value * work_unit
 
         # Add secondary muscle activations
         for muscle, value in muscle_data["secondary"].items():
             if muscle in activation:
-                activation[muscle] += value * weight
+                activation[muscle] += value * work_unit
 
     # Normalize to 0-1 range
     if total_weight > 0:

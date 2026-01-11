@@ -76,11 +76,17 @@ def create_user(user: User) -> str:
 
 def get_user(user_id: str) -> Optional[User]:
     """Get user by ID."""
-    doc = users_collection().find_one({"_id": ObjectId(user_id)})
-    if doc:
-        doc["_id"] = str(doc["_id"])
-        return User(**doc)
-    return None
+    try:
+        if not ObjectId.is_valid(user_id):
+            return None
+            
+        doc = users_collection().find_one({"_id": ObjectId(user_id)})
+        if doc:
+            doc["_id"] = str(doc["_id"])
+            return User(**doc)
+        return None
+    except Exception:
+        return None
 
 
 def get_user_by_email(email: str) -> Optional[User]:

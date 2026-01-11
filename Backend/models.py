@@ -51,9 +51,14 @@ class ExerciseSegment(BaseModel):
     duration_sec: float = 0
     reps: int = 0
     sets: int = 1
+    weight_kg: Optional[float] = None # Predicted weight
 
     # Muscle activation for this exercise
     muscle_activation: dict[str, float] = Field(default_factory=dict)
+    
+    # Metrics
+    avg_quality_score: Optional[float] = None
+    time_under_tension: Optional[float] = None
 
     # Form feedback
     form_feedback: list[FormFeedback] = Field(default_factory=list)
@@ -68,13 +73,14 @@ class ExerciseSegment(BaseModel):
 
     class Config:
         use_enum_values = True
-
+        extra = "allow" # Allow extra fields like 'range_of_motion' if they come from dicts
 
 class MuscleActivationSummary(BaseModel):
     """Aggregated muscle activation for a workout."""
     muscles: dict[str, float] = Field(default_factory=dict)
     primary_muscles: list[str] = Field(default_factory=list)
     secondary_muscles: list[str] = Field(default_factory=list)
+
 
 
 # ============================================================

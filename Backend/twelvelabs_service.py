@@ -11,7 +11,15 @@ from twelvelabs import TwelveLabs
 from twelvelabs.indexes import IndexesCreateRequestModelsItem
 
 from config import settings
-from models import ExerciseSegment, FormFeedback, FormSeverity
+from models import ExerciseSegment, FormFeedback, FormSeverity, Workout, MuscleActivationSummary, WorkoutStatus
+from muscle_map import calculate_session_activation
+from gemini_service import calculate_form_score
+from pose_service import PoseAnalyzer
+import concurrent.futures
+from functools import partial
+
+
+from gemini_service import estimate_weight_from_image
 
 # ============================================================
 # Client Initialization
@@ -341,8 +349,24 @@ def parse_exercise_data(data: dict) -> list[ExerciseSegment]:
 
     return exercises
 
-# Removed parse_exercise_response as it is replaced by parse_exercise_data
 
+# ============================================================
+# Pose Analysis Worker
+# ============================================================
+
+def _analyze_segment_worker(video_path: str, exercise_data: dict):
+    """Worker function for parallel pose analysis."""
+    try:
+        analyzer = PoseAnalyzer()
+        metrics = analyzer.analyze_segment(
+            video_path, 
+            exercise_data['start_sec'], 
+            exercise_data['end_sec']
+        )
+        return metrics
+    except Exception as e:
+        print(f"Error in pose worker: {e}")
+        return None
 
 
 # ============================================================
@@ -454,26 +478,24 @@ def process_workout_video(
     file_path: str = None,
     video_url: str = None,
     index_id: str = None,
+    user_id: str = None,  # Added user_id for DB saving
+    workout_id: str = None, # Added workout_id for DB updating
     on_status: Callable[[str, int], None] = None,
     analyze_form_deeply: bool = True
 ) -> dict:
     """
     Full pipeline: upload, index, and analyze a workout video.
-
-    Args:
-        file_path: Local path to video file
-        video_url: URL of video to process
-        index_id: TwelveLabs index ID (creates new one if not provided)
-        on_status: Callback for status updates (status_message, progress_percent)
-        analyze_form_deeply: Whether to do detailed form analysis per exercise
-
-    Returns:
-        Complete analysis results including exercises, form feedback, etc.
+    Includes parallel MediaPipe pose estimation and MongoDB storage.
     """
+    from database import update_workout, create_workout
+    
     def update_status(msg: str, pct: int):
         print(f"[Pipeline] {msg} ({pct}%)")
         if on_status:
             on_status(msg, pct)
+        if workout_id:
+             # Just invalidating status for now, ideally update status field
+             pass
 
     # Get or create index
     update_status("Initializing...", 0)
@@ -497,49 +519,115 @@ def process_workout_video(
     # Get video info
     update_status("Getting video info...", 45)
     video_info = get_video_info(index_id, video_id)
+    
+    # Retry duration check if 0
+    if video_info.get("duration", 0) == 0:
+        time.sleep(2)
+        video_info = get_video_info(index_id, video_id)
 
     # Detect exercises
     update_status("Detecting exercises...", 50)
     exercises = detect_exercises(index_id, video_id)
 
-    # Deep form analysis for each exercise (optional)
-    if analyze_form_deeply and exercises:
-        update_status("Analyzing form...", 60)
-        total_exercises = len(exercises)
+    # Parallel Pose Analysis & Deep Form
+    if exercises and file_path:
+        update_status("Analyzing biomechanics...", 60)
+        
+        # Prepare tasks for parallel execution
+        # We prefer ProcessPool for MediaPipe as it releases GIL effectively but CV2 can be heavy
+        # ThreadPool is often better for MediaPipe + CV2 due to lower overhead if GIL is released
+        # MediaPipe python solutions usually release GIL. 
+        # Using ThreadPoolExecutor for now as it handles shared memory objects better/easier
+        # and avoids pickling issues with some complex objects if any.
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # Prepare arguments for each exercise
+            future_to_exercise = {
+                executor.submit(_analyze_segment_worker, file_path, {
+                    'start_sec': ex.start_sec,
+                    'end_sec': ex.end_sec
+                }): ex
+                for ex in exercises
+            }
+            
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_exercise):
+                ex = future_to_exercise[future]
+                try:
+                    metrics = future.result()
+                    if metrics:
+                         # Update exercise with pose metrics
+                        ex.reps = metrics.rep_count
+                        ex.avg_quality_score = metrics.avg_quality_score
+                        
+                        ex.avg_joint_angles = {
+                            "elbow_min": metrics.min_angles.get("left_elbow", 0),
+                            "elbow_max": metrics.max_angles.get("left_elbow", 0),
+                            "knee_min": metrics.min_angles.get("left_knee", 0),
+                            "knee_max": metrics.max_angles.get("left_knee", 0)
+                        }
+                        
+                        # Estimate weight if frame captured
+                        if metrics.representative_frame:
+                            weight = estimate_weight_from_image(metrics.representative_frame, ex.name)
+                            if weight > 0:
+                                ex.weight_kg = weight
+                                # Heuristic: heavier weight = more intensity
+                                # Adjust quality score to reflect intensity
+                                # Example: 20kg dumbbells is decent for incline press
+                                ex.avg_quality_score *= (1 + (weight / 100)) 
+                        
+                        # Add feedback as simple notes
+                        for note in metrics.feedback:
+                            ex.form_feedback.append(FormFeedback(
+                                timestamp_sec=ex.start_sec, # Approx
+                                severity=FormSeverity.INFO,
+                                note=note
+                            ))
+                except Exception as exc:
+                    print(f"Pose analysis generated an exception for {ex.name}: {exc}")
+                
+                completed_count += 1
+                progress = 60 + int((completed_count / len(exercises)) * 30)
+                update_status(f"Analyzed {ex.name}", progress)
 
-        for i, exercise in enumerate(exercises):
-            progress = 60 + int((i / total_exercises) * 30)
-            update_status(f"Analyzing {exercise.name}...", progress)
-
-            form_analysis = analyze_exercise_form(index_id, video_id, exercise)
-
-            # Update exercise with detailed analysis
-            if "key_frames" in form_analysis:
-                exercise.avg_joint_angles = {}
-                for kf in form_analysis.get("key_frames", []):
-                    if "joint_angles" in kf:
-                        for joint, angle in kf["joint_angles"].items():
-                            if joint not in exercise.avg_joint_angles:
-                                exercise.avg_joint_angles[joint] = []
-                            exercise.avg_joint_angles[joint].append(angle)
-
-                # Average the angles
-                exercise.avg_joint_angles = {
-                    k: sum(v) / len(v)
-                    for k, v in exercise.avg_joint_angles.items()
-                    if v
-                }
-
-            # Add any additional form feedback from deep analysis
-            if "key_frames" in form_analysis:
-                for kf in form_analysis.get("key_frames", []):
-                    if kf.get("assessment") == "needs_work" and kf.get("notes"):
-                        exercise.form_feedback.append(FormFeedback(
-                            timestamp_sec=kf.get("timestamp_sec", 0),
-                            severity=FormSeverity.WARNING,
-                            note=kf.get("notes", ""),
-                            joint_angles=kf.get("joint_angles")
-                        ))
+    # Save to Database
+    update_status("Saving results...", 95)
+    
+    # Calculate summaries
+    exercise_summary = [
+        {"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps}
+        for ex in exercises
+    ]
+    muscle_activation = calculate_session_activation(exercise_summary)
+    form_score = calculate_form_score(exercises)
+    
+    # Create or Update Workout
+    if workout_id:
+        update_workout(workout_id, {
+            "status": WorkoutStatus.COMPLETE,
+            "twelvelabs_video_id": video_id,
+            "video_duration_sec": video_info.get("duration", 0),
+            "exercises": [ex.model_dump() for ex in exercises], # Pydantic v2
+            "muscle_activation": muscle_activation,
+            "form_score": form_score,
+            "hls_url": video_info.get("hls_url"),
+            "thumbnail_url": video_info.get("thumbnails")[0] if video_info.get("thumbnails") else None
+        })
+    elif user_id:
+         w = Workout(
+            user_id=user_id,
+            video_filename=os.path.basename(file_path) if file_path else "video",
+            status=WorkoutStatus.COMPLETE,
+            twelvelabs_video_id=video_id,
+            video_duration_sec=video_info.get("duration", 0),
+            exercises=exercises,
+            muscle_activation=MuscleActivationSummary(**muscle_activation) if isinstance(muscle_activation, dict) else muscle_activation,
+            form_score=form_score,
+            hls_url=video_info.get("hls_url"),
+            thumbnail_url=video_info.get("thumbnails")[0] if video_info.get("thumbnails") else None
+         )
+         workout_id = create_workout(w)
 
     update_status("Complete!", 100)
 
@@ -548,7 +636,9 @@ def process_workout_video(
         "video_id": video_id,
         "video_info": video_info,
         "exercises": exercises,
+        "workout_id": workout_id
     }
+
 
 
 # ============================================================
