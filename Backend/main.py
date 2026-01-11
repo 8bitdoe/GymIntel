@@ -31,6 +31,52 @@ from twelvelabs_service import process_workout_video, get_or_create_index
 from gemini_service import generate_workout_summary, calculate_form_score, generate_workout_insights
 from coach_service import CoachService
 
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from typing import Optional
+from pydantic import BaseModel
+
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+# ============================================================
+# New Request/Response Models
+# ============================================================
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RegisterStep2Request(BaseModel):
+    user_id: str
+    name: str
+    height_cm: Optional[float] = None
+    weight_kg: Optional[float] = None
+    experience_level: str = "intermediate"
+    goals: list[str] = []
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class PublicStatsResponse(BaseModel):
+    total_users: int
+    total_workouts: int
+    avg_form_score: float
+    avg_muscle_activation: dict[str, float]
+    avg_depth_metrics: dict[str, float]
+    percentiles: dict[str, dict[str, float]]  # metric -> {p25, p50, p75, p90}
+
+
+class ComparisonResponse(BaseModel):
+    user_stats: dict
+    public_stats: dict
+    percentile_rank: dict[str, float]  # metric -> user's percentile
+
 
 # ============================================================
 # Processing Status Tracking (In-memory, use Redis in production)
@@ -175,11 +221,11 @@ async def api_update_user(user_id: str, request: UpdateUserRequest):
     updates = {k: v for k, v in request.model_dump().items() if v is not None}
     if not updates:
         return {"message": "No updates provided"}
-        
+
     success = update_user(user_id, updates)
     if not success:
         raise HTTPException(404, "User not found")
-        
+
     return {"message": "User updated successfully", "user_id": user_id}
 
 
@@ -242,7 +288,7 @@ async def api_upload_workout(
         video_url=video_url,
         status=WorkoutStatus.PENDING
     )
-    
+
     workout_id = create_workout(workout)
     print(f"[API] Created workout {workout_id} for user {target_user_id}")
 
@@ -310,11 +356,11 @@ def process_workout_background(
 
         # Generate AI insights using Gemini
         exercises = result["exercises"]
-        
+
         # Calculate aggregated muscle activation
         exercise_data = [{"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps, "weight_kg": ex.weight_kg, "avg_quality_score": ex.avg_quality_score} for ex in exercises]
         muscle_activation = calculate_session_activation(exercise_data)
-        
+
         # Calculate totals for summary
         primary = [m for m, v in sorted(muscle_activation.items(), key=lambda x: -x[1]) if v > 0.3][:3]
         secondary = [m for m, v in sorted(muscle_activation.items(), key=lambda x: -x[1]) if 0.1 < v <= 0.3][:3]
@@ -324,7 +370,7 @@ def process_workout_background(
 
         try:
              insights = generate_workout_insights(exercises)
-             
+
              # Final update with insights and muscle activation
              update_workout(workout_id, {
                  "summary": insights.get("summary"),
@@ -337,8 +383,8 @@ def process_workout_background(
                     "secondary_muscles": secondary
                  },
                  "form_score": form_score
-                 # exercises are already saved by process_workout_video? 
-                 # Wait, process_workout_video returns a dict but does it save? 
+                 # exercises are already saved by process_workout_video?
+                 # Wait, process_workout_video returns a dict but does it save?
                  # Let's verify twelvelabs_service.py. Assuming it does NOT save to DB fully or we want to overwrite to be safe.
                  # Actually, we should save exercises here to be sure.
              })
@@ -349,7 +395,7 @@ def process_workout_background(
 
         processing_status.set(workout_id, "complete", 100, "Analysis complete!")
         print(f"[API] Workout processing complete: {workout_id}")
-        
+
         # Cleanup uploaded file if needed
         if file_path and os.path.exists(file_path) and "test_videos" not in file_path:
              try:
@@ -510,6 +556,276 @@ async def api_get_dashboard(user_id: str, days: int = 30):
             }
             for w in recent_workouts[:5]
         ]
+    }
+
+
+# ============================================================
+# Auth Endpoints
+# ============================================================
+
+@app.post("/api/auth/register")
+async def register_step1(request: RegisterRequest):
+    """Step 1: Create user with email/password."""
+    from database import users_collection, get_user_by_email
+
+    # Check if email exists
+    existing = get_user_by_email(request.email)
+    if existing:
+        raise HTTPException(400, "Email already registered")
+
+    # Hash password and create user
+    hashed_password = pwd_context.hash(request.password)
+
+    user_doc = {
+        "email": request.email,
+        "password_hash": hashed_password,
+        "name": "",  # To be filled in step 2
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+        "experience_level": "intermediate",
+        "registration_complete": False,
+        "total_workouts": 0,
+        "total_duration_min": 0
+    }
+
+    result = users_collection().insert_one(user_doc)
+    return {"user_id": str(result.inserted_id), "message": "Step 1 complete"}
+
+
+@app.post("/api/auth/register/complete")
+async def register_step2(request: RegisterStep2Request):
+    """Step 2: Complete profile with name and optional details."""
+    from database import users_collection
+    from bson import ObjectId
+
+    result = users_collection().update_one(
+        {"_id": ObjectId(request.user_id)},
+        {"$set": {
+            "name": request.name,
+            "height_cm": request.height_cm,
+            "weight_kg": request.weight_kg,
+            "experience_level": request.experience_level,
+            "goals": request.goals,
+            "registration_complete": True,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(404, "User not found")
+
+    return {"user_id": request.user_id, "message": "Registration complete"}
+
+
+@app.post("/api/auth/login")
+async def login(request: LoginRequest):
+    """Login with email/password."""
+    from database import users_collection
+
+    user = users_collection().find_one({"email": request.email})
+    if not user:
+        raise HTTPException(401, "Invalid credentials")
+
+    if not pwd_context.verify(request.password, user.get("password_hash", "")):
+        raise HTTPException(401, "Invalid credentials")
+
+    user["_id"] = str(user["_id"])
+    del user["password_hash"]  # Don't send password hash
+
+    return {"user": user, "message": "Login successful"}
+
+
+# ============================================================
+# Public Stats & Comparison Endpoints
+# ============================================================
+
+@app.get("/api/stats/public")
+async def get_public_stats():
+    """Get aggregated public statistics for comparison."""
+    from database import workouts_collection, users_collection
+
+    # Total counts
+    total_users = users_collection().count_documents({"registration_complete": True})
+    total_workouts = workouts_collection().count_documents({"status": "complete"})
+
+    # Aggregate muscle activation across all users
+    pipeline = [
+        {"$match": {"status": "complete", "muscle_activation.muscles": {"$exists": True}}},
+        {"$group": {
+            "_id": None,
+            "avg_form_score": {"$avg": "$form_score"},
+            "all_activations": {"$push": "$muscle_activation.muscles"},
+            "all_exercises": {"$push": "$exercises"}
+        }}
+    ]
+
+    result = list(workouts_collection().aggregate(pipeline))
+
+    if not result:
+        return {
+            "total_users": total_users,
+            "total_workouts": total_workouts,
+            "avg_form_score": 0,
+            "avg_muscle_activation": {},
+            "avg_depth_metrics": {},
+            "percentiles": {}
+        }
+
+    data = result[0]
+
+    # Calculate average muscle activation
+    muscle_totals = {}
+    muscle_counts = {}
+    for activation in data.get("all_activations", []):
+        if isinstance(activation, dict):
+            for muscle, value in activation.items():
+                muscle_totals[muscle] = muscle_totals.get(muscle, 0) + value
+                muscle_counts[muscle] = muscle_counts.get(muscle, 0) + 1
+
+    avg_muscle = {m: muscle_totals[m] / muscle_counts[m]
+                  for m in muscle_totals if muscle_counts[m] > 0}
+
+    # Calculate depth metrics from exercises
+    knee_depths = []
+    hip_depths = []
+    for exercises in data.get("all_exercises", []):
+        for ex in (exercises or []):
+            rom = ex.get("range_of_motion", {}) or {}
+            if rom.get("knee_depth"):
+                knee_depths.append(rom["knee_depth"])
+            if rom.get("hip_depth"):
+                hip_depths.append(rom["hip_depth"])
+
+    import numpy as np
+    avg_depth = {}
+    percentiles = {}
+
+    if knee_depths:
+        avg_depth["knee_depth"] = float(np.mean(knee_depths))
+        percentiles["knee_depth"] = {
+            "p25": float(np.percentile(knee_depths, 25)),
+            "p50": float(np.percentile(knee_depths, 50)),
+            "p75": float(np.percentile(knee_depths, 75)),
+            "p90": float(np.percentile(knee_depths, 90))
+        }
+
+    if hip_depths:
+        avg_depth["hip_depth"] = float(np.mean(hip_depths))
+        percentiles["hip_depth"] = {
+            "p25": float(np.percentile(hip_depths, 25)),
+            "p50": float(np.percentile(hip_depths, 50)),
+            "p75": float(np.percentile(hip_depths, 75)),
+            "p90": float(np.percentile(hip_depths, 90))
+        }
+
+    # Form score percentiles
+    form_scores = list(workouts_collection().find(
+        {"status": "complete", "form_score": {"$ne": None}},
+        {"form_score": 1}
+    ))
+    if form_scores:
+        scores = [w["form_score"] for w in form_scores]
+        percentiles["form_score"] = {
+            "p25": float(np.percentile(scores, 25)),
+            "p50": float(np.percentile(scores, 50)),
+            "p75": float(np.percentile(scores, 75)),
+            "p90": float(np.percentile(scores, 90))
+        }
+
+    return {
+        "total_users": total_users,
+        "total_workouts": total_workouts,
+        "avg_form_score": data.get("avg_form_score", 0) or 0,
+        "avg_muscle_activation": avg_muscle,
+        "avg_depth_metrics": avg_depth,
+        "percentiles": percentiles
+    }
+
+
+@app.get("/api/stats/compare/{user_id}")
+async def compare_to_public(user_id: str, days: int = 30):
+    """Compare user's stats to public averages."""
+    from database import get_recent_workouts, get_muscle_activation_history, get_avg_form_score
+    import numpy as np
+
+    # Resolve 'undefined' to demo user
+    if user_id == "undefined":
+        demo_user = get_user_by_email("undefined@demo.gymintel.com")
+        if demo_user:
+            user_id = demo_user.id
+
+    # Get user's stats
+    user_workouts = get_recent_workouts(user_id, days)
+    user_activation_history = get_muscle_activation_history(user_id, days)
+    user_form_score = get_avg_form_score(user_id, days)
+
+    # Aggregate user's muscle activation
+    user_muscle = {}
+    if user_activation_history:
+        for session in user_activation_history:
+            for muscle, value in session.items():
+                user_muscle[muscle] = user_muscle.get(muscle, 0) + value
+        total_sessions = len(user_activation_history)
+        user_muscle = {m: v / total_sessions for m, v in user_muscle.items()}
+
+    # Get user's depth metrics
+    user_knee_depths = []
+    user_hip_depths = []
+    for w in user_workouts:
+        for ex in w.exercises:
+            rom = ex.range_of_motion or {}
+            if rom.get("knee_depth"):
+                user_knee_depths.append(rom["knee_depth"])
+            if rom.get("hip_depth"):
+                user_hip_depths.append(rom["hip_depth"])
+
+    user_avg_knee = float(np.mean(user_knee_depths)) if user_knee_depths else 0
+    user_avg_hip = float(np.mean(user_hip_depths)) if user_hip_depths else 0
+
+    # Get public stats
+    public_stats = await get_public_stats()
+
+    # Calculate percentile ranks
+    percentile_rank = {}
+
+    # Form score percentile
+    if user_form_score and public_stats.get("percentiles", {}).get("form_score"):
+        p = public_stats["percentiles"]["form_score"]
+        if user_form_score >= p["p90"]:
+            percentile_rank["form_score"] = 90
+        elif user_form_score >= p["p75"]:
+            percentile_rank["form_score"] = 75
+        elif user_form_score >= p["p50"]:
+            percentile_rank["form_score"] = 50
+        elif user_form_score >= p["p25"]:
+            percentile_rank["form_score"] = 25
+        else:
+            percentile_rank["form_score"] = 10
+
+    # Knee depth percentile
+    if user_avg_knee and public_stats.get("percentiles", {}).get("knee_depth"):
+        p = public_stats["percentiles"]["knee_depth"]
+        if user_avg_knee >= p["p90"]:
+            percentile_rank["knee_depth"] = 90
+        elif user_avg_knee >= p["p75"]:
+            percentile_rank["knee_depth"] = 75
+        elif user_avg_knee >= p["p50"]:
+            percentile_rank["knee_depth"] = 50
+        elif user_avg_knee >= p["p25"]:
+            percentile_rank["knee_depth"] = 25
+        else:
+            percentile_rank["knee_depth"] = 10
+
+    return {
+        "user_stats": {
+            "workout_count": len(user_workouts),
+            "avg_form_score": user_form_score,
+            "muscle_activation": user_muscle,
+            "avg_knee_depth": user_avg_knee,
+            "avg_hip_depth": user_avg_hip
+        },
+        "public_stats": public_stats,
+        "percentile_rank": percentile_rank
     }
 
 

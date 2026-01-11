@@ -478,34 +478,25 @@ def process_workout_video(
     file_path: str = None,
     video_url: str = None,
     index_id: str = None,
-    user_id: str = None,  # Added user_id for DB saving
-    workout_id: str = None, # Added workout_id for DB updating
+    user_id: str = None,
+    workout_id: str = None,
     on_status: Callable[[str, int], None] = None,
     analyze_form_deeply: bool = True
 ) -> dict:
-    """
-    Full pipeline: upload, index, and analyze a workout video.
-    Includes parallel MediaPipe pose estimation and MongoDB storage.
-    """
+    """Full pipeline with fixed duration calculation."""
     from database import update_workout, create_workout
     
     def update_status(msg: str, pct: int):
         print(f"[Pipeline] {msg} ({pct}%)")
         if on_status:
             on_status(msg, pct)
-        if workout_id:
-             # Just invalidating status for now, ideally update status field
-             pass
 
-    # Get or create index
     update_status("Initializing...", 0)
     index_id = index_id or get_or_create_index()
 
-    # Upload and index video
     update_status("Uploading video...", 5)
 
     def on_upload_progress(pct):
-        # Map 0-100 upload progress to 5-40 overall
         overall = 5 + int(pct * 0.35)
         update_status("Processing video...", overall)
 
@@ -516,32 +507,45 @@ def process_workout_video(
         on_progress=on_upload_progress
     )
 
-    # Get video info
     update_status("Getting video info...", 45)
     video_info = get_video_info(index_id, video_id)
     
-    # Retry duration check if 0
+    # Retry duration check
     if video_info.get("duration", 0) == 0:
         time.sleep(2)
         video_info = get_video_info(index_id, video_id)
 
-    # Detect exercises
     update_status("Detecting exercises...", 50)
     exercises = detect_exercises(index_id, video_id)
 
-    # Parallel Pose Analysis & Deep Form
+    # === FIX: Calculate duration from exercises if API returns 0 ===
+    api_duration = video_info.get("duration", 0)
+    if api_duration == 0 and exercises:
+        # Calculate from exercise segments
+        calculated_duration = max(ex.end_sec for ex in exercises) if exercises else 0
+        video_info["duration"] = calculated_duration
+        print(f"[Pipeline] Duration calculated from segments: {calculated_duration:.1f}s")
+    
+    # Also try to get duration from video file directly if still 0
+    if video_info.get("duration", 0) == 0 and file_path:
+        try:
+            import cv2
+            cap = cv2.VideoCapture(file_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            cap.release()
+            if fps > 0 and frame_count > 0:
+                video_info["duration"] = frame_count / fps
+                print(f"[Pipeline] Duration from CV2: {video_info['duration']:.1f}s")
+        except Exception as e:
+            print(f"[Pipeline] Could not get duration from CV2: {e}")
+    # === END FIX ===
+
+    # Rest of the function continues as before...
     if exercises and file_path:
         update_status("Analyzing biomechanics...", 60)
         
-        # Prepare tasks for parallel execution
-        # We prefer ProcessPool for MediaPipe as it releases GIL effectively but CV2 can be heavy
-        # ThreadPool is often better for MediaPipe + CV2 due to lower overhead if GIL is released
-        # MediaPipe python solutions usually release GIL. 
-        # Using ThreadPoolExecutor for now as it handles shared memory objects better/easier
-        # and avoids pickling issues with some complex objects if any.
-        
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            # Prepare arguments for each exercise
             future_to_exercise = {
                 executor.submit(_analyze_segment_worker, file_path, {
                     'start_sec': ex.start_sec,
@@ -556,8 +560,7 @@ def process_workout_video(
                 try:
                     metrics = future.result()
                     if metrics:
-                         # Update exercise with pose metrics
-                        ex.reps = metrics.rep_count
+                        ex.reps = metrics.rep_count if metrics.rep_count > 0 else ex.reps
                         ex.avg_quality_score = metrics.avg_quality_score
                         
                         ex.avg_joint_angles = {
@@ -567,67 +570,71 @@ def process_workout_video(
                             "knee_max": metrics.max_angles.get("left_knee", 0)
                         }
                         
-                        # Estimate weight if frame captured
                         if metrics.representative_frame:
                             weight = estimate_weight_from_image(metrics.representative_frame, ex.name)
                             if weight > 0:
                                 ex.weight_kg = weight
-                                # Heuristic: heavier weight = more intensity
-                                # Adjust quality score to reflect intensity
-                                # Example: 20kg dumbbells is decent for incline press
-                                ex.avg_quality_score *= (1 + (weight / 100)) 
+                                ex.avg_quality_score *= (1 + (weight / 100))
                         
-                        # Add feedback as simple notes
                         for note in metrics.feedback:
                             ex.form_feedback.append(FormFeedback(
-                                timestamp_sec=ex.start_sec, # Approx
+                                timestamp_sec=ex.start_sec,
                                 severity=FormSeverity.INFO,
                                 note=note
                             ))
                 except Exception as exc:
-                    print(f"Pose analysis generated an exception for {ex.name}: {exc}")
+                    print(f"Pose analysis exception for {ex.name}: {exc}")
                 
                 completed_count += 1
                 progress = 60 + int((completed_count / len(exercises)) * 30)
                 update_status(f"Analyzed {ex.name}", progress)
 
-    # Save to Database
     update_status("Saving results...", 95)
     
-    # Calculate summaries
     exercise_summary = [
-        {"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps}
+        {"name": ex.name, "duration_sec": ex.duration_sec, "reps": ex.reps, 
+         "weight_kg": ex.weight_kg, "avg_quality_score": ex.avg_quality_score}
         for ex in exercises
     ]
     muscle_activation = calculate_session_activation(exercise_summary)
     form_score = calculate_form_score(exercises)
     
-    # Create or Update Workout
+    primary = [m for m, v in sorted(muscle_activation.items(), key=lambda x: -x[1]) if v > 0.3][:3]
+    secondary = [m for m, v in sorted(muscle_activation.items(), key=lambda x: -x[1]) if 0.1 < v <= 0.3][:3]
+    
     if workout_id:
         update_workout(workout_id, {
             "status": WorkoutStatus.COMPLETE,
             "twelvelabs_video_id": video_id,
             "video_duration_sec": video_info.get("duration", 0),
-            "exercises": [ex.model_dump() for ex in exercises], # Pydantic v2
-            "muscle_activation": muscle_activation,
+            "exercises": [ex.model_dump() for ex in exercises],
+            "muscle_activation": {
+                "muscles": muscle_activation,
+                "primary_muscles": primary,
+                "secondary_muscles": secondary
+            },
             "form_score": form_score,
             "hls_url": video_info.get("hls_url"),
-            "thumbnail_url": video_info.get("thumbnails")[0] if video_info.get("thumbnails") else None
+            "thumbnail_url": video_info.get("thumbnails", [None])[0]
         })
     elif user_id:
-         w = Workout(
+        w = Workout(
             user_id=user_id,
             video_filename=os.path.basename(file_path) if file_path else "video",
             status=WorkoutStatus.COMPLETE,
             twelvelabs_video_id=video_id,
             video_duration_sec=video_info.get("duration", 0),
             exercises=exercises,
-            muscle_activation=MuscleActivationSummary(**muscle_activation) if isinstance(muscle_activation, dict) else muscle_activation,
+            muscle_activation=MuscleActivationSummary(
+                muscles=muscle_activation,
+                primary_muscles=primary,
+                secondary_muscles=secondary
+            ),
             form_score=form_score,
             hls_url=video_info.get("hls_url"),
-            thumbnail_url=video_info.get("thumbnails")[0] if video_info.get("thumbnails") else None
-         )
-         workout_id = create_workout(w)
+            thumbnail_url=video_info.get("thumbnails", [None])[0]
+        )
+        workout_id = create_workout(w)
 
     update_status("Complete!", 100)
 
