@@ -65,7 +65,9 @@ def test_video_processing(video_path: str, analyze_deeply: bool = True):
             if ex.form_feedback:
                 print(f"      Form Feedback ({len(ex.form_feedback)} notes):")
                 for fb in ex.form_feedback[:5]:  # Show first 5
-                    icon = "✅" if fb.severity.value == "info" else "⚠️" if fb.severity.value == "warning" else "🚨"
+                    # severity is a string due to Pydantic use_enum_values=True
+                    s = fb.severity
+                    icon = "✅" if s == "info" else "⚠️" if s == "warning" else "🚨"
                     print(f"         {icon} [{fb.timestamp_sec:.1f}s] {fb.note}")
 
             if ex.avg_joint_angles:

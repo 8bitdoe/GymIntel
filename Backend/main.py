@@ -311,6 +311,7 @@ def process_workout_background(
             "status": WorkoutStatus.COMPLETE.value,
             "twelvelabs_video_id": result["video_id"],
             "video_duration_sec": video_info.get("duration", 0),
+            "hls_url": video_info.get("hls_url"),
             "thumbnail_url": video_info.get("thumbnails", [None])[0] if video_info.get("thumbnails") else None,
             "exercises": [ex.model_dump() for ex in exercises],
             "muscle_activation": {

@@ -120,6 +120,7 @@ class Workout(BaseModel):
     # Video info
     video_filename: str = ""
     video_url: Optional[str] = None
+    hls_url: Optional[str] = None
     video_duration_sec: float = 0
     thumbnail_url: Optional[str] = None
 

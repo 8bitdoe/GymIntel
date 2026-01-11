@@ -4,9 +4,11 @@ Video upload, indexing, and exercise detection using TwelveLabs API.
 """
 import time
 import json
+import os
 from typing import Optional, Callable
 from twelvelabs import TwelveLabs
-from twelvelabs.models import Task
+
+from twelvelabs.indexes import IndexesCreateRequestModelsItem
 
 from config import settings
 from models import ExerciseSegment, FormFeedback, FormSeverity
@@ -37,23 +39,29 @@ def get_or_create_index(index_name: str = None) -> str:
 
     # Check if index exists
     try:
-        indexes = client.index.list()
+        # Paginating through indexes to find match
+        indexes = client.indexes.list(page=1, page_limit=50)
+        # indexes is a SyncPager, which is iterable directly
         for idx in indexes:
-            if idx.name == index_name:
+            if idx.index_name == index_name:
                 print(f"[TwelveLabs] Found existing index: {idx.id}")
                 return idx.id
     except Exception as e:
         print(f"[TwelveLabs] Error listing indexes: {e}")
 
-    # Create new index with Marengo for video understanding
+    # Create new index with Pegasus (for generation) and Marengo (for search)
     try:
-        index = client.index.create(
-            name=index_name,
-            engines=[
-                {
-                    "name": "marengo2.6",
-                    "options": ["visual", "conversation"]
-                }
+        index = client.indexes.create(
+            index_name=index_name,
+            models=[
+                IndexesCreateRequestModelsItem(
+                    model_name="marengo2.7", 
+                    model_options=["visual", "conversation", "text_in_video"]
+                ),
+                IndexesCreateRequestModelsItem(
+                    model_name="pegasus1.2", 
+                    model_options=["visual", "conversation"]
+                )
             ]
         )
         print(f"[TwelveLabs] Created new index: {index.id}")
@@ -82,25 +90,39 @@ def upload_video(
     print(f"[TwelveLabs] Starting upload to index {index_id}")
 
     try:
+        # Step 1: Create Asset
         if file_path:
-            # Upload from local file
-            task = client.task.create(
-                index_id=index_id,
-                file=file_path,
-            )
+             # Upload from local file
+             print(f"[TwelveLabs] Uploading file: {file_path}")
+             with open(file_path, "rb") as f:
+                 asset = client.assets.create(
+                     method="direct",
+                     file=f,
+                     filename=os.path.basename(file_path)
+                 )
         elif video_url:
-            # Upload from URL
-            task = client.task.create(
-                index_id=index_id,
-                url=video_url,
-            )
+             # Upload from URL
+             print(f"[TwelveLabs] Uploading URL: {video_url}")
+             asset = client.assets.create(
+                 method="url",
+                 url=video_url
+             )
         else:
             raise ValueError("Either file_path or video_url must be provided")
+        
+        print(f"[TwelveLabs] Asset created: {asset.id}")
 
-        print(f"[TwelveLabs] Task created: {task.id}")
+        # Step 2: Create Indexed Asset (Index the asset)
+        # Note: enable_video_stream=True is required for HLS playback
+        indexed_asset = client.indexes.indexed_assets.create(
+            index_id=index_id,
+            asset_id=asset.id,
+            enable_video_stream=True
+        )
+        print(f"[TwelveLabs] Indexing started: {indexed_asset.id}")
 
-        # Wait for task to complete
-        video_id = wait_for_task(task.id, on_progress)
+        # Step 3: Wait for indexing
+        video_id = wait_for_indexing(index_id, indexed_asset.id, on_progress)
         return video_id
 
     except Exception as e:
@@ -108,36 +130,41 @@ def upload_video(
         raise
 
 
-def wait_for_task(task_id: str, on_progress: Callable[[int], None] = None, timeout: int = 600) -> str:
-    """Wait for a task to complete. Returns video_id."""
+def wait_for_indexing(index_id: str, indexed_asset_id: str, on_progress: Callable[[int], None] = None, timeout: int = 600) -> str:
+    """Wait for an asset to be indexed. Returns video_id (indexed_asset_id)."""
     client = get_client()
     start = time.time()
     last_status = None
 
     while time.time() - start < timeout:
-        task = client.task.retrieve(task_id)
+        # Use retrieve to check status
+        try:
+            task = client.indexes.indexed_assets.retrieve(index_id, indexed_asset_id)
+            
+            status = getattr(task, 'status', 'unknown')
+            if status != last_status:
+                print(f"[TwelveLabs] Indexing status: {status}")
+                last_status = status
 
-        if task.status != last_status:
-            print(f"[TwelveLabs] Task status: {task.status}")
-            last_status = task.status
+            if on_progress and (status == "processing" or status == "waiting" or status == "pending"):
+                # Estimate progress
+                elapsed = time.time() - start
+                estimated_progress = min(int((elapsed / 60) * 100), 95)
+                on_progress(estimated_progress)
 
-        if on_progress and task.status == "indexing":
-            # Estimate progress based on time (TwelveLabs doesn't give percentage)
-            elapsed = time.time() - start
-            estimated_progress = min(int((elapsed / 120) * 100), 95)  # Cap at 95%
-            on_progress(estimated_progress)
+            if status == "ready":
+                print(f"[TwelveLabs] Video indexed: {task.id}")
+                if on_progress:
+                    on_progress(100)
+                return task.id
+            elif status == "failed":
+                raise Exception(f"Indexing failed for {indexed_asset_id}")
+        except Exception as e:
+             print(f"[TwelveLabs] Polling error (retrying): {e}")
 
-        if task.status == "ready":
-            print(f"[TwelveLabs] Video indexed: {task.video_id}")
-            if on_progress:
-                on_progress(100)
-            return task.video_id
-        elif task.status == "failed":
-            raise Exception(f"Task failed: {task_id}")
+        time.sleep(2)
 
-        time.sleep(5)
-
-    raise TimeoutError(f"Task not complete after {timeout}s")
+    raise TimeoutError(f"Indexing not complete after {timeout}s")
 
 
 def get_video_info(index_id: str, video_id: str) -> dict:
@@ -145,15 +172,35 @@ def get_video_info(index_id: str, video_id: str) -> dict:
     client = get_client()
 
     try:
-        video = client.index.video.retrieve(index_id=index_id, id=video_id)
+        # Use positional arguments for retrieve: index_id, asset_id
+        video = client.indexes.indexed_assets.retrieve(index_id, video_id)
+        
+        # Safely extract metadata
+        duration = 0
+        filename = "unknown"
+        width = 0
+        height = 0
+        hls_url = None
+        thumbnails = []
+
+        if hasattr(video, 'metadata') and video.metadata:
+            duration = getattr(video.metadata, 'duration', 0)
+            filename = getattr(video.metadata, 'filename', "unknown")
+            width = getattr(video.metadata, 'width', 0)
+            height = getattr(video.metadata, 'height', 0)
+            
+        if hasattr(video, 'hls') and video.hls:
+            hls_url = getattr(video.hls, 'video_url', None)
+            thumbnails = getattr(video.hls, 'thumbnail_urls', [])
+
         return {
             "id": video.id,
-            "duration": video.metadata.duration if video.metadata else 0,
-            "filename": video.metadata.filename if video.metadata else "unknown",
-            "width": video.metadata.width if video.metadata else 0,
-            "height": video.metadata.height if video.metadata else 0,
-            "hls_url": video.hls.video_url if video.hls else None,
-            "thumbnails": video.hls.thumbnail_urls if video.hls else [],
+            "duration": duration,
+            "filename": filename,
+            "width": width,
+            "height": height,
+            "hls_url": hls_url,
+            "thumbnails": thumbnails,
         }
     except Exception as e:
         print(f"[TwelveLabs] Error getting video info: {e}")
@@ -167,42 +214,51 @@ def get_video_info(index_id: str, video_id: str) -> dict:
 EXERCISE_DETECTION_PROMPT = """Analyze this workout video and identify ALL exercises performed.
 
 For each exercise found, provide:
-1. Exercise name (use standard gym terminology like "squat", "bench press", "deadlift", "bicep curl", "lat pulldown", etc.)
+1. Exercise name (use standard gym terminology)
 2. Start time in seconds
 3. End time in seconds  
 4. Estimated number of reps
 5. Any form observations (good or bad)
 
 IMPORTANT: Watch the ENTIRE video carefully. Don't miss any exercises.
-
-Respond ONLY with valid JSON in this exact format:
-{
-  "exercises": [
-    {
-      "name": "exercise name",
-      "start_sec": 0.0,
-      "end_sec": 30.0,
-      "reps": 10,
-      "form_notes": [
-        {"timestamp_sec": 5.0, "severity": "info", "note": "Good depth on squat"},
-        {"timestamp_sec": 15.0, "severity": "warning", "note": "Knees caving slightly"}
-      ]
-    }
-  ]
-}
-
-Severity levels:
-- "info": Good form observations
-- "warning": Minor form issues to watch
-- "critical": Safety concerns that could cause injury
-
-If no exercises are detected, return: {"exercises": []}
 """
+
+EXERCISE_SCHEMA = {
+  "type": "object",
+  "properties": {
+    "exercises": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "start_sec": {"type": "number"},
+          "end_sec": {"type": "number"},
+          "reps": {"type": "integer"},
+          "form_notes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "timestamp_sec": {"type": "number"},
+                "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+                "note": {"type": "string"}
+              },
+              "required": ["timestamp_sec", "severity", "note"]
+            }
+          }
+        },
+        "required": ["name", "start_sec", "end_sec"]
+      }
+    }
+  },
+  "required": ["exercises"]
+}
 
 
 def detect_exercises(index_id: str, video_id: str) -> list[ExerciseSegment]:
     """
-    Detect exercises in a video using TwelveLabs generate API.
+    Detect exercises in a video using TwelveLabs analyze API with structured output.
     Returns list of ExerciseSegment objects.
     """
     client = get_client()
@@ -210,70 +266,58 @@ def detect_exercises(index_id: str, video_id: str) -> list[ExerciseSegment]:
     print(f"[TwelveLabs] Detecting exercises in video {video_id}")
 
     try:
-        # Use generate API to analyze the video
-        result = client.generate.text(
+        # Use analyze API with structured output
+        result = client.analyze(
             video_id=video_id,
             prompt=EXERCISE_DETECTION_PROMPT,
-            temperature=0.2,  # Low temperature for consistent output
+            temperature=0.2,
+            response_format={
+                "type": "json_schema",
+                "json_schema": EXERCISE_SCHEMA
+            }
         )
 
-        response_text = result.data if hasattr(result, 'data') else str(result)
-        print(f"[TwelveLabs] Raw response: {response_text[:500]}...")
-
-        # Parse the JSON response
-        exercises = parse_exercise_response(response_text)
-        print(f"[TwelveLabs] Detected {len(exercises)} exercises")
-
-        return exercises
+        print(f"[TwelveLabs] Analysis complete")
+        
+        # Parse the structured response
+        if hasattr(result, 'data'):
+            # result.data should be a dict if structured output worked, or a string json
+            if isinstance(result.data, str):
+                try:
+                    data = json.loads(result.data)
+                except:
+                    print(f"[TwelveLabs] Could not part JSON string: {result.data[:100]}...")
+                    return []
+            else:
+                data = result.data
+            
+            return parse_exercise_data(data)
+        else:
+            print("[TwelveLabs] No data in response")
+            return []
 
     except Exception as e:
         print(f"[TwelveLabs] Error detecting exercises: {e}")
         return []
 
 
-def parse_exercise_response(response_text: str) -> list[ExerciseSegment]:
-    """Parse the exercise detection response."""
-    # Clean up response - remove markdown code blocks if present
-    text = response_text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Remove first and last lines if they're code block markers
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-
-    # Try to find JSON in the response
-    try:
-        # First try direct parse
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # Try to extract JSON from text
-        import re
-        json_match = re.search(r'\{[\s\S]*\}', text)
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                print(f"[TwelveLabs] Failed to parse JSON from response")
-                return []
-        else:
-            print(f"[TwelveLabs] No JSON found in response")
-            return []
-
+def parse_exercise_data(data: dict) -> list[ExerciseSegment]:
+    """Parse the structured exercise data."""
     exercises = []
+    
+    # Handle case where data might be wrapped
+    if not isinstance(data, dict):
+        print(f"[TwelveLabs] Unexpected data format: {type(data)}")
+        return []
+
     for ex in data.get("exercises", []):
         # Parse form feedback
         form_feedback = []
         for note in ex.get("form_notes", []):
             try:
-                severity = note.get("severity", "info")
-                if severity not in ["info", "warning", "critical"]:
-                    severity = "info"
                 form_feedback.append(FormFeedback(
                     timestamp_sec=float(note.get("timestamp_sec", 0)),
-                    severity=FormSeverity(severity),
+                    severity=FormSeverity(note.get("severity", "info")),
                     note=str(note.get("note", ""))
                 ))
             except Exception as e:
@@ -290,12 +334,15 @@ def parse_exercise_response(response_text: str) -> list[ExerciseSegment]:
                 duration_sec=end - start,
                 reps=int(ex.get("reps", 0)),
                 form_feedback=form_feedback,
-                confidence=0.9,  # TwelveLabs doesn't provide confidence
+                confidence=0.9,
             ))
         except Exception as e:
             print(f"[TwelveLabs] Error parsing exercise: {e}")
 
     return exercises
+
+# Removed parse_exercise_response as it is replaced by parse_exercise_data
+
 
 
 # ============================================================
@@ -337,39 +384,62 @@ Respond in JSON format:
 """
 
 
+FORM_SCHEMA = {
+  "type": "object",
+  "properties": {
+    "exercise": {"type": "string"},
+    "key_frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "timestamp_sec": {"type": "number"},
+          "phase": {"type": "string"},
+          "body_position": {"type": "string"},
+          "joint_angles": {
+             "type": "object",
+             "additionalProperties": {"type": "number"}
+          },
+          "assessment": {"type": "string", "enum": ["good", "needs_work"]},
+          "notes": {"type": "string"}
+        },
+        "required": ["timestamp_sec", "phase", "assessment"]
+      }
+    },
+    "overall_form_score": {"type": "integer"},
+    "summary": {"type": "string"}
+  },
+  "required": ["key_frames", "summary", "exercise"]
+}
+
+
 def analyze_exercise_form(index_id: str, video_id: str, exercise: ExerciseSegment) -> dict:
     """
     Deep form analysis for a specific exercise segment.
-    Extracts key frames and detailed pose information.
     """
     client = get_client()
 
     prompt = get_key_frames_prompt(exercise.name, exercise.start_sec, exercise.end_sec)
 
     try:
-        result = client.generate.text(
+        result = client.analyze(
             video_id=video_id,
             prompt=prompt,
             temperature=0.3,
+            response_format={
+                "type": "json_schema",
+                "json_schema": FORM_SCHEMA
+            }
         )
 
-        response_text = result.data if hasattr(result, 'data') else str(result)
-
-        # Parse JSON response
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")[1:-1]
-            text = "\n".join(lines)
-
-        try:
-            data = json.loads(text)
-            return data
-        except json.JSONDecodeError:
-            import re
-            json_match = re.search(r'\{[\s\S]*\}', text)
-            if json_match:
-                return json.loads(json_match.group())
-            return {"error": "Failed to parse response", "raw": response_text[:500]}
+        if hasattr(result, 'data'):
+             if isinstance(result.data, str):
+                 try:
+                     return json.loads(result.data)
+                 except:
+                     return {"error": "Failed to parse JSON string"}
+             return result.data
+        return {"error": "No data returned"}
 
     except Exception as e:
         print(f"[TwelveLabs] Error analyzing form: {e}")

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GymIntel - AI Workout Coach</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="bg-slate-900 text-white font-sans antialiased h-screen flex flex-col overflow-hidden">
+
+    <!-- Mobile-first Navigation -->
+    <nav class="bg-slate-800 border-b border-slate-700 p-4 flex justify-between items-center z-50">
+        <div class="flex items-center gap-2">
+            <i class="fa-solid fa-dumbbell text-blue-500 text-xl"></i>
+            <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent">GymIntel</h1>
+        </div>
+        <div id="user-profile" class="hidden flex items-center gap-3">
+            <span id="user-name" class="text-sm text-slate-300">User</span>
+            <button onclick="logout()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-sign-out-alt"></i></button>
+        </div>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main id="app" class="flex-1 overflow-y-auto relative p-4 pb-20">
+        
+        <!-- Login View -->
+        <div id="view-login" class="view hidden h-full flex flex-col justify-center items-center max-w-md mx-auto">
+            <div class="text-center mb-8">
+                <h2 class="text-3xl font-bold mb-2">Welcome Back</h2>
+                <p class="text-slate-400">Sign in to track your progress</p>
+            </div>
+            <form onsubmit="handleLogin(event)" class="w-full space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-400 mb-1">Email</label>
+                    <input type="email" id="login-email" required class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="you@example.com">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-slate-400 mb-1">Name</label>
+                    <input type="text" id="login-name" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="Your Name">
+                </div>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition shadow-lg shadow-blue-900/50">
+                    Get Started
+                </button>
+            </form>
+        </div>
+
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view hidden space-y-6 max-w-2xl mx-auto">
+            <div class="flex justify-between items-end">
+                <h2 class="text-2xl font-bold">Dashboard</h2>
+                <div class="text-right">
+                    <p class="text-xs text-slate-400">Form Score</p>
+                    <p class="text-2xl font-bold text-green-400" id="dash-form-score">--</p>
+                </div>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-2 gap-4">
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                    <div class="text-slate-400 text-xs uppercase tracking-wider mb-1">Workouts</div>
+                    <div class="text-2xl font-bold" id="dash-workouts-count">0</div>
+                </div>
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                    <div class="text-slate-400 text-xs uppercase tracking-wider mb-1">Minutes</div>
+                    <div class="text-2xl font-bold" id="dash-minutes">0</div>
+                </div>
+            </div>
+
+            <!-- Muscle Map (Simplified) -->
+            <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                <h3 class="text-lg font-semibold mb-4">Muscle Activation</h3>
+                <div id="muscle-map-container" class="relative h-64 w-full flex justify-center items-center bg-slate-900/50 rounded-lg">
+                    <!-- SVG Muscle Map will be injected here -->
+                    <div class="text-slate-500 text-sm">Muscle Map Visualization</div>
+                </div>
+            </div>
+
+            <!-- Recent Workouts List -->
+            <div>
+                <h3 class="text-lg font-semibold mb-3">Recent Workouts</h3>
+                <div id="workouts-list" class="space-y-3">
+                    <!-- Workout Items injected here -->
+                    <div class="animate-pulse flex space-x-4">
+                        <div class="rounded-full bg-slate-700 h-12 w-12"></div>
+                        <div class="flex-1 space-y-2 py-1">
+                            <div class="h-4 bg-slate-700 rounded w-3/4"></div>
+                            <div class="h-4 bg-slate-700 rounded w-5/6"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Upload View -->
+        <div id="view-upload" class="view hidden h-full flex flex-col max-w-xl mx-auto">
+            <h2 class="text-2xl font-bold mb-6">New Workout</h2>
+            
+            <div class="bg-slate-800 border-2 border-dashed border-slate-600 rounded-2xl p-8 flex flex-col items-center justify-center text-center hover:border-blue-500 transition-colors cursor-pointer" id="drop-zone">
+                <input type="file" id="video-upload" accept="video/*" class="hidden" onchange="handleFileSelect(event)">
+                <div class="w-16 h-16 bg-slate-700 rounded-full flex items-center justify-center mb-4">
+                    <i class="fa-solid fa-cloud-upload-alt text-2xl text-blue-400"></i>
+                </div>
+                <h3 class="text-lg font-semibold mb-2">Upload Video</h3>
+                <p class="text-slate-400 text-sm mb-6">Drag & drop or tap to select</p>
+                <button onclick="document.getElementById('video-upload').click()" class="bg-blue-600 px-6 py-2 rounded-lg font-medium hover:bg-blue-500 transition">Select File</button>
+            </div>
+
+            <!-- Upload Progress -->
+            <div id="upload-progress" class="hidden mt-8 space-y-4">
+                <div class="flex justify-between text-sm">
+                    <span id="status-text">Uploading...</span>
+                    <span id="progress-text">0%</span>
+                </div>
+                <div class="w-full bg-slate-700 rounded-full h-2">
+                    <div id="progress-bar" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+                <p class="text-xs text-slate-500 text-center mt-2">Analyzing form and detecting exercises...</p>
+            </div>
+        </div>
+
+        <!-- Workout Detail View -->
+        <div id="view-workout-detail" class="view hidden max-w-2xl mx-auto pb-8">
+            <button onclick="switchView('view-dashboard')" class="mb-4 text-slate-400 hover:text-white flex items-center gap-2">
+                <i class="fa-solid fa-arrow-left"></i> Back to Dashboard
+            </button>
+            
+            <div id="workout-detail-content">
+                <!-- Content injected via JS -->
+            </div>
+        </div>
+
+        <!-- Coach View -->
+        <div id="view-coach" class="view hidden h-full flex flex-col max-w-xl mx-auto">
+            <div class="flex-1 overflow-y-auto space-y-4 pr-1" id="chat-messages">
+                <!-- Chat bubbles -->
+                <div class="flex items-start gap-3">
+                    <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
+                        <i class="fa-solid fa-robot text-white text-xs"></i>
+                    </div>
+                    <div class="bg-slate-800 p-3 rounded-2xl rounded-tl-none border border-slate-700 max-w-[80%]">
+                        <p class="text-sm">Hi! I'm your GymIntel coach. How was your workout today?</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-2 border-t border-slate-800">
+                <form onsubmit="handleChat(event)" class="flex gap-2">
+                    <input type="text" id="chat-input" class="flex-1 bg-slate-800 border border-slate-700 rounded-full px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="Ask about your form...">
+                    <button type="submit" class="w-12 h-12 rounded-full bg-blue-600 hover:bg-blue-500 flex items-center justify-center text-white transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed" id="send-btn">
+                        <i class="fa-solid fa-paper-plane"></i>
+                    </button>
+                </form>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Bottom Navigation Bar (App-like) -->
+    <footer class="bg-slate-800 border-t border-slate-700 p-2 safe-area-pb">
+        <div class="flex justify-around items-center max-w-md mx-auto">
+            <button onclick="switchView('view-dashboard')" class="nav-btn active flex flex-col items-center p-2 text-slate-400 hover:text-blue-400 transition">
+                <i class="fa-solid fa-chart-pie text-xl mb-1"></i>
+                <span class="text-[10px]">Dashboard</span>
+            </button>
+            <button onclick="switchView('view-upload')" class="nav-btn flex flex-col items-center p-2 text-slate-400 hover:text-blue-400 transition">
+                <div class="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center -mt-6 border-4 border-slate-800 shadow-lg text-white">
+                    <i class="fa-solid fa-plus"></i>
+                </div>
+            </button>
+            <button onclick="switchView('view-coach')" class="nav-btn flex flex-col items-center p-2 text-slate-400 hover:text-blue-400 transition">
+                <i class="fa-solid fa-comments text-xl mb-1"></i>
+                <span class="text-[10px]">Coach</span>
+            </button>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

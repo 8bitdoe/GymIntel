@@ -1,0 +1,101 @@
+:root {
+    --primary: #2563eb;
+    --background: #0f172a;
+    --surface: #1e293b;
+    --text: #f1f5f9;
+}
+
+body {
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Hide scrollbar for cleaner UI */
+::-webkit-scrollbar {
+    width: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 3px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.view:not(.hidden) {
+    animation: fadeIn 0.3s ease-out;
+}
+
+.nav-btn.active {
+    color: #60a5fa;
+}
+
+/* Muscle Map Styles */
+.muscle-map svg {
+    max-height: 100%;
+    width: auto;
+}
+
+.muscle-path {
+    fill: #334155;
+    transition: fill 0.3s ease;
+}
+
+.muscle-path.active-low { fill: #93c5fd; }
+.muscle-path.active-med { fill: #3b82f6; }
+.muscle-path.active-high { fill: #ef4444; }
+
+/* Upload Progress Animation */
+@keyframes pulse-glow {
+    0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(37, 99, 235, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+}
+
+#drop-zone:hover {
+    animation: pulse-glow 2s infinite;
+}
+
+/* Chat Bubbles */
+.chat-bubble-user {
+    background-color: #2563eb;
+    color: white;
+    border-radius: 1rem 1rem 0 1rem;
+}
+
+.chat-bubble-ai {
+    background-color: #1e293b;
+    color: #f1f5f9;
+    border-radius: 1rem 1rem 1rem 0;
+    border: 1px solid #334155;
+}
+
+.loader {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #fff;
+    box-shadow: 32px 0 #fff, -32px 0 #fff;
+    position: relative;
+    animation: flash 0.5s ease-out infinite alternate;
+}
+
+@keyframes flash {
+    0% {
+        background-color: #FFF2;
+        box-shadow: 32px 0 #FFF2, -32px 0 #FFF;
+    }
+    50% {
+        background-color: #FFF;
+        box-shadow: 32px 0 #FFF2, -32px 0 #FFF2;
+    }
+    100% {
+        background-color: #FFF2;
+        box-shadow: 32px 0 #FFF, -32px 0 #FFF2;
+    }
+}
