@@ -1,0 +1,5 @@
+Backend/.venv
+Backend/.idea
+Backend/__pycache__
+Backend/.env
+Backend/test_videos
