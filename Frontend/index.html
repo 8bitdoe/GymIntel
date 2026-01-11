@@ -69,12 +69,11 @@
                 </div>
             </div>
 
-            <!-- Muscle Map (Simplified) -->
+            <!-- Muscle Map -->
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
                 <h3 class="text-lg font-semibold mb-4">Muscle Activation</h3>
-                <div id="muscle-map-container" class="relative h-64 w-full flex justify-center items-center bg-slate-900/50 rounded-lg">
-                    <!-- SVG Muscle Map will be injected here -->
-                    <div class="text-slate-500 text-sm">Muscle Map Visualization</div>
+                <div id="muscle-map-container" class="relative min-h-[200px] w-full flex justify-center items-center bg-slate-900/50 rounded-lg">
+                    <div class="text-slate-500 text-sm">Loading...</div>
                 </div>
             </div>
 
@@ -82,7 +81,6 @@
             <div>
                 <h3 class="text-lg font-semibold mb-3">Recent Workouts</h3>
                 <div id="workouts-list" class="space-y-3">
-                    <!-- Workout Items injected here -->
                     <div class="animate-pulse flex space-x-4">
                         <div class="rounded-full bg-slate-700 h-12 w-12"></div>
                         <div class="flex-1 space-y-2 py-1">
@@ -122,6 +120,7 @@
         </div>
 
         <!-- Workout Detail View -->
+        <!-- FIX: Single back button here, JS content no longer includes one -->
         <div id="view-workout-detail" class="view hidden max-w-2xl mx-auto pb-8">
             <button onclick="switchView('view-dashboard')" class="mb-4 text-slate-400 hover:text-white flex items-center gap-2">
                 <i class="fa-solid fa-arrow-left"></i> Back to Dashboard
@@ -135,7 +134,6 @@
         <!-- Coach View -->
         <div id="view-coach" class="view hidden h-full flex flex-col max-w-xl mx-auto">
             <div class="flex-1 overflow-y-auto space-y-4 pr-1" id="chat-messages">
-                <!-- Chat bubbles -->
                 <div class="flex items-start gap-3">
                     <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
                         <i class="fa-solid fa-robot text-white text-xs"></i>
@@ -158,19 +156,20 @@
 
     </main>
 
-    <!-- Bottom Navigation Bar (App-like) -->
+    <!-- Bottom Navigation Bar -->
     <footer class="bg-slate-800 border-t border-slate-700 p-2 safe-area-pb">
         <div class="flex justify-around items-center max-w-md mx-auto">
-            <button onclick="switchView('view-dashboard')" class="nav-btn active flex flex-col items-center p-2 text-slate-400 hover:text-blue-400 transition">
+            <button onclick="switchView('view-dashboard')" class="nav-btn active flex flex-col items-center justify-center p-2 w-16 text-slate-400 hover:text-blue-400 transition">
                 <i class="fa-solid fa-chart-pie text-xl mb-1"></i>
                 <span class="text-[10px]">Dashboard</span>
             </button>
-            <button onclick="switchView('view-upload')" class="nav-btn flex flex-col items-center p-2 text-slate-400 hover:text-blue-400 transition">
-                <div class="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center -mt-6 border-4 border-slate-800 shadow-lg text-white">
+            <button onclick="switchView('view-upload')" class="nav-btn flex flex-col items-center justify-center p-2 w-16 text-slate-400 hover:text-blue-400 transition">
+                <div class="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center shadow-lg text-white">
                     <i class="fa-solid fa-plus"></i>
                 </div>
+                <span class="text-[10px] mt-1">Upload</span>
             </button>
-            <button onclick="switchView('view-coach')" class="nav-btn flex flex-col items-center p-2 text-slate-400 hover:text-blue-400 transition">
+            <button onclick="switchView('view-coach')" class="nav-btn flex flex-col items-center justify-center p-2 w-16 text-slate-400 hover:text-blue-400 transition">
                 <i class="fa-solid fa-comments text-xl mb-1"></i>
                 <span class="text-[10px]">Coach</span>
             </button>

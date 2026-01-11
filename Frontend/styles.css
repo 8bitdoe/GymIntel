@@ -75,12 +75,29 @@ body {
     border: 1px solid #334155;
 }
 
+/* FIX: New contained typing dots animation */
+.typing-dots span {
+    animation: typingBounce 1s ease-in-out infinite;
+}
+
+@keyframes typingBounce {
+    0%, 60%, 100% {
+        transform: translateY(0);
+        opacity: 0.4;
+    }
+    30% {
+        transform: translateY(-4px);
+        opacity: 1;
+    }
+}
+
+/* Old loader - kept for reference but no longer used */
 .loader {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     background-color: #fff;
-    box-shadow: 32px 0 #fff, -32px 0 #fff;
+    box-shadow: 16px 0 #fff, -16px 0 #fff;
     position: relative;
     animation: flash 0.5s ease-out infinite alternate;
 }
@@ -88,14 +105,14 @@ body {
 @keyframes flash {
     0% {
         background-color: #FFF2;
-        box-shadow: 32px 0 #FFF2, -32px 0 #FFF;
+        box-shadow: 16px 0 #FFF2, -16px 0 #FFF;
     }
     50% {
         background-color: #FFF;
-        box-shadow: 32px 0 #FFF2, -32px 0 #FFF2;
+        box-shadow: 16px 0 #FFF2, -16px 0 #FFF2;
     }
     100% {
         background-color: #FFF2;
-        box-shadow: 32px 0 #FFF, -32px 0 #FFF2;
+        box-shadow: 16px 0 #FFF, -16px 0 #FFF2;
     }
 }
